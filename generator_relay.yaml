@@ -1,0 +1,666 @@
+# ==============================================================================
+# ESPHOME E-INK DISPLAY CONFIGURATION
+# ==============================================================================
+# Device: ESP32-based e-ink display for solar/battery monitoring
+# Display: Waveshare 2.9" e-paper display (296x128 pixels)
+# Purpose: Shows real-time solar power generation and battery statistics
+#          from Home Assistant via API integration
+# Update: Refreshes every 30 minutes or when data changes
+# ==============================================================================
+
+# ==============================================================================
+# PIN SUBSTITUTIONS - Waveshare EPD 7.5" V2 Pin Configuration
+# ==============================================================================
+# These substitutions define GPIO pin mappings for the SPI e-ink display.
+# Using substitutions makes the config more readable and easier to maintain.
+# Based on Waveshare EPD_7IN5_V2 / DEV_Config.h pin layout
+# ==============================================================================
+substitutions:
+  device_name: lolin-test               # Device identifier for ESPHome
+  
+  # SPI Communication Pins (3-wire SPI + DC pin)
+  gpio_spi_clk_pin: GPIO13              # SPI Clock - synchronizes data transfer
+  gpio_spi_mosi_pin: GPIO14             # SPI MOSI (Master Out Slave In) - data from ESP to display
+  # Note: MISO not needed for e-ink (display doesn't send data back)
+  
+  # Display Control Pins
+  gpio_cs_pin: GPIO15                   # Chip Select - enables display for SPI communication
+                                        # LOW = display is selected and listening
+  gpio_dc_pin: GPIO27                   # Data/Command - tells display if we're sending:
+                                        # LOW = command, HIGH = data
+  gpio_reset_pin: GPIO26                # Reset - hardware reset for display initialization
+                                        # Pulled LOW briefly to reset display controller
+  gpio_busy_pin: GPIO25                 # Busy - display signals when it's busy refreshing
+                                        # HIGH = display is busy, don't send new data
+                                        # ESP must wait for this to go LOW before updating
+
+# ==============================================================================
+# ESPHOME CORE CONFIGURATION
+# ==============================================================================
+# Defines device identity and boot-time behavior
+# ==============================================================================
+esphome:
+  name: design-29-eink                  # Device name in ESPHome (used for mDNS, logs)
+  friendly_name: Design_29_eink         # Human-readable name shown in Home Assistant
+  
+  # Boot sequence - runs when ESP32 powers on or restarts
+  on_boot:
+    # priority: 200.0                   # Boot priority (commented out = default priority)
+                                        # Lower number = runs earlier in boot sequence
+    then:
+      # Step 1: Trigger initial display update
+      - component.update: epaper        # Force e-ink display to refresh immediately
+      
+      # Step 2: Wait for Home Assistant data to arrive
+      - wait_until:
+          condition:
+            # Lambda function checks if we've received initial data
+            # This prevents displaying blank/stale data on first boot
+            lambda: 'return id(data_updated) == true;'
+            # The display will wait here until at least one sensor updates
+      
+      # Step 3: Give extra time for all sensors to receive values
+      - delay: 5s                       # 5 second delay ensures all 12+ sensors have updated
+                                        # Some sensors may update slower than others
+      
+      # Step 4: Mark that initial data collection is complete
+      - lambda: 'id(initial_data_received) = true;'
+      
+      # Step 5: Update the screen with fresh data
+      - script.execute: update_screen   # Calls the update_screen script below
+
+# ==============================================================================
+# GLOBAL VARIABLES
+# ==============================================================================
+# These variables track state across script executions and reboots.
+# Used to intelligently determine when the display needs refreshing.
+# Thanks to @paviro for this pattern!
+# ==============================================================================
+globals:
+  # Tracks whether any sensor data has changed since last display update
+  - id: data_updated
+    type: bool                          # Boolean flag (true/false)
+    restore_value: no                   # Don't save to flash (reset to false on reboot)
+    initial_value: 'false'              # Start as false until first sensor update
+                                        # Set to true by sensor on_value triggers
+                                        # Reset to false after display updates
+
+  # Tracks whether we've received initial data from Home Assistant
+  - id: initial_data_received
+    type: bool                          # Boolean flag
+    restore_value: no                   # Reset on reboot (always wait for fresh data)
+    initial_value: 'false'              # Start false, set to true after boot sequence
+                                        # Prevents premature display updates on boot
+
+  # Integer version of battery wattage for calculations
+  - id: eink_battery_wattage_int
+    type: int                           # Integer type (whole numbers only)
+    restore_value: no                   # Don't persist across reboots
+    initial_value: "0"                  # Start at 0 watts
+                                        # Can be used for arrow direction (charging/discharging)
+                                        # Currently defined but not actively used in display
+
+# ==============================================================================
+# ESP32 HARDWARE CONFIGURATION
+# ==============================================================================
+# Specifies the ESP32 board type and framework for compilation
+# ==============================================================================
+esp32:
+  board: esp32dev                       # Generic ESP32 development board
+                                        # Works with most ESP32 boards (NodeMCU, WROOM, etc.)
+  framework:
+    type: arduino                       # Use Arduino framework (vs ESP-IDF)
+                                        # Arduino = easier, more libraries available
+                                        # ESP-IDF = more advanced, lower-level control
+
+# ==============================================================================
+# LOGGING
+# ==============================================================================
+# Enables serial logging for debugging and monitoring
+# ==============================================================================
+logger:                                 # Default logging to serial console
+                                        # View logs via USB serial or OTA logs in ESPHome
+                                        # Useful for debugging sensor updates and display refreshes
+                                        # Default level: DEBUG (shows all messages)
+
+# ==============================================================================
+# HOME ASSISTANT API
+# ==============================================================================
+# Enables communication with Home Assistant for:
+# - Sensor data retrieval (battery, solar, temperature)
+# - Remote control and monitoring
+# - OTA updates through Home Assistant
+# ==============================================================================
+api:
+  port: 6053                            # Custom API port (default is 6053)
+                                        # Must match port configured in Home Assistant
+  # password: ''                        # API password (commented out = no password)
+                                        # Using encryption key instead (more secure)
+  
+  reboot_timeout: 15min                 # How long to wait for API connection before rebooting
+                                        # If Home Assistant is down for 15 min, ESP reboots
+                                        # Helps recover from network issues automatically
+  
+  encryption:
+    key: "LaFlP25HXhcAacElXjhftudcMs5VyyAnYDPXAot5OC8="
+                                        # Encryption key for secure API communication
+                                        # Generated by ESPHome, keeps data encrypted in transit
+                                        # Store this key safely - needed for Home Assistant integration
+
+# ==============================================================================
+# OTA (OVER-THE-AIR) UPDATES
+# ==============================================================================
+# Allows firmware updates via WiFi without physical USB connection
+# ==============================================================================
+ota:
+  - platform: esphome                   # Use ESPHome's OTA update mechanism
+    password: "6aa3531a412564f7389f282492e15389"
+                                        # Password required to upload new firmware
+                                        # Prevents unauthorized firmware modifications
+                                        # Keep this secret and secure!
+
+# ==============================================================================
+# WIFI CONFIGURATION
+# ==============================================================================
+# Network settings for connecting to WiFi and Home Assistant
+# ==============================================================================
+wifi:
+  # Static IP configuration (recommended for IoT devices)
+  manual_ip:
+    static_ip: 10.10.30.14              # Fixed IP address for this e-ink display
+                                        # Easier to find device, faster DHCP-free boot
+                                        # Must be outside DHCP range to avoid conflicts
+    gateway: 10.10.30.1                 # Router IP address (default gateway)
+                                        # Usually ends in .1 for home networks
+    subnet: 255.255.255.0               # Subnet mask defining network size
+                                        # 255.255.255.0 = /24 network (254 usable IPs)
+    dns1: 10.10.10.10                   # Primary DNS server (possibly local DNS/Pi-hole)
+    dns2: 10.10.30.1                    # Secondary DNS server (router as backup)
+  
+  # WiFi credentials stored in secrets.yaml file
+  ssid: !secret wifi_ssid_design        # WiFi network name (SSID)
+                                        # !secret pulls from secrets.yaml
+                                        # Keeps sensitive data out of main config
+  password: !secret wifi_password_design # WiFi password
+                                        # Also stored in secrets.yaml for security
+
+  # Fallback Access Point (AP mode if WiFi fails)
+  ap:
+    ssid: "Design-29-Eink Fallback Hotspot"
+                                        # Hotspot name if can't connect to main WiFi
+                                        # ESP creates its own WiFi network
+    password: "TdeniV3NgHaX"            # Password for fallback hotspot
+                                        # Connect to this to reconfigure WiFi settings
+
+# ==============================================================================
+# CAPTIVE PORTAL
+# ==============================================================================
+# Creates a web interface when in AP (fallback) mode
+# Allows WiFi reconfiguration without reflashing firmware
+# ==============================================================================
+captive_portal:                         # Enables captive portal (like hotel WiFi login pages)
+                                        # When connected to fallback hotspot, browser
+                                        # automatically opens config page
+                                        # Can update WiFi credentials via web UI
+
+# ==============================================================================
+# TIME SYNCHRONIZATION
+# ==============================================================================
+# Syncs time with Home Assistant for accurate timestamps on display
+# ==============================================================================
+time:
+  - platform: homeassistant             # Get time from Home Assistant
+    id: homeassistant_time              # Reference ID for use in display lambda
+                                        # More accurate than NTP (already synced in HA)
+                                        # No need for separate NTP configuration
+    
+    # Scheduled actions based on time
+    on_time:
+      - seconds: 0                      # Trigger at 0 seconds past the minute
+        minutes: /60                    # Every 60 minutes (once per hour)
+                                        # /60 = divisible by 60 = :00 of each hour
+        then:
+          # Check if data has been updated since last display refresh
+          - if:
+              condition:
+                lambda: 'return id(data_updated) == true;'
+              then:
+                # This section is commented out - hourly auto-update disabled
+                # Would trigger screen update every hour if data changed
+                # Currently only updates on 30min interval or data change
+#                - if:
+#                    condition:
+#                      binary_sensor.is_on: screen_on
+#                    then:
+#                      - script.execute: update_screen
+
+# ==============================================================================
+# SCRIPTS
+# ==============================================================================
+# Reusable automation sequences that can be called from anywhere
+# ==============================================================================
+script:
+  # Screen update script - refreshes the e-ink display
+  - id: update_screen
+    then:
+      # Step 1: Reset the data_updated flag
+      - lambda: 'id(data_updated) = false;'
+                                        # Mark that we've processed the data change
+                                        # Next update won't trigger until new data arrives
+      
+      # Step 2: Trigger display component to re-render
+      - component.update: epaper        # Calls the display lambda below
+                                        # E-ink physically refreshes (takes 2-15 seconds)
+                                        # Full refresh causes characteristic flashing
+
+# ==============================================================================
+# TEXT SENSORS - HOME ASSISTANT DATA SOURCES
+# ==============================================================================
+# These sensors pull data from Home Assistant entities via the API.
+# Each sensor triggers data_updated = true when it receives a new value,
+# which eventually causes a display refresh.
+# ==============================================================================
+# SENSOR PATTERN:
+# - platform: homeassistant = get data from Home Assistant
+# - entity_id: the Home Assistant sensor to monitor
+# - internal: True = don't expose back to Home Assistant (prevent loops)
+# - on_value: trigger when sensor updates (sets data_updated flag)
+# ==============================================================================
+
+text_sensor:
+  # --------------------------------------------------------------------------
+  # TEMPERATURE SENSOR
+  # --------------------------------------------------------------------------
+  # Room temperature from Broadlink RM4 Pro IR blaster/temp sensor
+  # --------------------------------------------------------------------------
+  - platform: homeassistant
+    id: current_temperature             # Reference ID for use in display
+    entity_id: sensor.broadlink_rm4_pro_temperature
+                                        # Home Assistant entity providing temperature
+                                        # Broadlink RM4 Pro has built-in temperature sensor
+    internal: True                      # Don't expose this back to Home Assistant
+                                        # Prevents circular reference and clutter
+    on_value:                           # Trigger when temperature updates
+      then:
+        - lambda: 'id(data_updated) = true;'
+                                        # Flag that display needs refresh
+                                        # Will trigger update on next interval
+
+  # ==========================================================================
+  # BATTERY MONITORING SENSORS (Victron System)
+  # ==========================================================================
+  # These sensors monitor the battery bank status from Victron Energy devices
+  # Victron is a popular solar/battery system manufacturer
+  # ==========================================================================
+  
+  # Battery State of Charge (%)
+  - platform: homeassistant
+    id: eink_battery_soc                # State of Charge (0-100%)
+    entity_id: sensor.victron_battery_soc_245
+                                        # 245 = Victron device instance number
+                                        # Shows battery capacity remaining
+    internal: True
+    on_value:
+      then:
+        - lambda: 'id(data_updated) = true;'
+
+  # Battery Power (Watts)
+  - platform: homeassistant
+    id: eink_battery_wattage            # Current battery power (W)
+    entity_id: sensor.victron_system_battery_power
+                                        # Positive = discharging (using battery)
+                                        # Negative = charging (storing energy)
+                                        # Used to show current power flow
+    internal: True
+    on_value:
+      then:
+        - lambda: 'id(data_updated) = true;'
+
+  # Battery Voltage (V)
+  - platform: homeassistant
+    id: eink_battery_voltage            # Battery voltage (typically 12V, 24V, or 48V system)
+    entity_id: sensor.victron_battery_voltage_245
+                                        # Important for battery health monitoring
+                                        # Voltage drops when battery is depleted
+    internal: True
+    on_value:
+      then:
+        - lambda: 'id(data_updated) = true;'
+
+  # Battery Current (A)
+  - platform: homeassistant
+    id: eink_battery_current            # Current flowing in/out of battery (Amps)
+    entity_id: sensor.victron_battery_current_245
+                                        # Positive = discharging current
+                                        # Negative = charging current
+                                        # Power = Voltage × Current
+    internal: True
+    on_value:
+      then:
+        - lambda: 'id(data_updated) = true;'
+
+  # ==========================================================================
+  # SOLAR YIELD SENSORS (Energy Production Today)
+  # ==========================================================================
+  # These track daily energy harvest from solar panels (kWh = kilowatt-hours)
+  # Multiple MPPT (Maximum Power Point Tracking) solar charge controllers
+  # ==========================================================================
+  
+  # Total Combined Solar Yield Today
+  - platform: homeassistant
+    id: total_yield_today               # Sum of all solar arrays today (kWh)
+    entity_id: sensor.total_yield_today
+                                        # Calculated in Home Assistant
+                                        # Combines yield from all MPPT controllers
+                                        # Resets at midnight
+    internal: True
+    on_value:
+      then:
+        - lambda: 'id(data_updated) = true;'
+
+  # Upper Solar Array Yield (MPPT 150/35)
+  - platform: homeassistant
+    id: yield_today_150_35              # Energy from upper array today (kWh)
+    entity_id: sensor.victron_mppt_239_yield_today_239
+                                        # MPPT 150/35 = 150V max, 35A max controller
+                                        # 239 = Victron device instance number
+                                        # Tracks specific solar panel array production
+    internal: True
+    on_value:
+      then:
+        - lambda: 'id(data_updated) = true;'
+
+  # Lower Solar Array Yield (MPPT 150/60)
+  - platform: homeassistant
+    id: yield_today_150_60              # Energy from lower array today (kWh)
+    entity_id: sensor.victron_mppt_247_yield_today_247
+                                        # MPPT 150/60 = 150V max, 60A max controller
+                                        # 247 = Victron device instance number
+                                        # Larger controller (60A vs 35A) for more panels
+    internal: True
+    on_value:
+      then:
+        - lambda: 'id(data_updated) = true;'
+
+  # ==========================================================================
+  # SOLAR POWER SENSORS (Peak Power Today)
+  # ==========================================================================
+  # These track maximum instantaneous power from solar panels (W = watts)
+  # Shows peak solar production during the day
+  # ==========================================================================
+  
+  # Total Peak Power Today (All Arrays Combined)
+  - platform: homeassistant
+    id: eink_total_maxpower_today       # Highest combined power output today (W)
+    entity_id: sensor.total_maxpower_today
+                                        # Maximum instantaneous power from all arrays
+                                        # Useful for sizing decisions and performance
+    internal: True
+    on_value:
+      then:
+        - lambda: 'id(data_updated) = true;'
+
+  # Upper Array Peak Power Today (MPPT 150/35)
+  - platform: homeassistant
+    id: eink_maxpower_today_150_35      # Highest power from upper array today (W)
+    entity_id: sensor.victron_mppt_239_maxpower_today_239
+                                        # Peak output from upper solar array
+                                        # Helps identify shading or panel issues
+    internal: True
+    on_value:
+      then:
+        - lambda: 'id(data_updated) = true;'
+
+  # Lower Array Peak Power Today (MPPT 150/60)
+  - platform: homeassistant
+    id: eink_maxpower_today_150_60      # Highest power from lower array today (W)
+    entity_id: sensor.victron_mppt_247_maxpower_today_247
+                                        # Peak output from lower solar array
+                                        # Compare with upper array for diagnostics
+    internal: True
+    on_value:
+      then:
+        - lambda: 'id(data_updated) = true;'
+
+# ==============================================================================
+# SPI BUS CONFIGURATION
+# ==============================================================================
+# Configures the SPI (Serial Peripheral Interface) bus for e-ink communication
+# SPI is a synchronous serial protocol for fast data transfer to displays
+# ==============================================================================
+spi:
+  clk_pin: $gpio_spi_clk_pin            # Clock pin (GPIO13) - timing signal
+                                        # Clock pulses synchronize data transfer
+  mosi_pin: $gpio_spi_mosi_pin          # MOSI pin (GPIO14) - data output
+                                        # Master Out Slave In = ESP to display
+                                        # No MISO needed (display doesn't send data back)
+  id: epaper_display                    # Reference ID for display component below
+
+# ==============================================================================
+# FONT CONFIGURATION
+# ==============================================================================
+# Defines fonts used for rendering text on the e-ink display
+# ==============================================================================
+font:
+  - file: 'fonts/OpenSans_Condensed-Light.ttf'
+                                        # TrueType font file path (relative to config)
+                                        # OpenSans Condensed Light = narrow, readable font
+                                        # Good for fitting lots of data on small displays
+    id: font_medium_65                  # Reference ID for use in display lambda
+    size: 20                            # Font size in pixels (height)
+                                        # Size 20 = good balance for 296px wide display
+                                        # Can adjust based on readability needs
+
+# ==============================================================================
+# E-INK DISPLAY CONFIGURATION
+# ==============================================================================
+# Configures the Waveshare 2.9" e-paper display
+# E-ink displays:
+# - Only update when content changes (no backlight, no constant refresh)
+# - Very low power consumption (ideal for battery operation)
+# - Sunlight readable (reflects light like paper)
+# - Slow refresh (2-15 seconds per update)
+# - Limited to black & white (this model) or red/black (other models)
+# ==============================================================================
+display:
+  - platform: waveshare_epaper          # Use Waveshare e-paper driver
+    id: epaper                          # Reference ID for component.update calls
+    
+    # Hardware pin connections (from substitutions above)
+    cs_pin: $gpio_cs_pin                # Chip Select (GPIO15)
+    busy_pin: $gpio_busy_pin            # Busy signal (GPIO25)
+                                        # ESP reads this to know when display is ready
+    # Alternative busy pin configuration (commented out):
+    # busy_pin: 
+    #   number: $gpio_busy_pin
+    #   inverted: true                  # Use if busy signal is inverted (active LOW)
+    
+    reset_pin: $gpio_reset_pin          # Reset (GPIO26)
+    dc_pin: $gpio_dc_pin                # Data/Command (GPIO27)
+    
+    # Display model selection
+    # CRITICAL: Must match your exact display model!
+    model: 2.90inv2                     # 2.9" display, inverted version 2
+                                        # "inv2" = updated controller chip version
+                                        # Finally found the working model after testing!
+    # model: 2.90in-b                   # Alternative model (didn't work for this display)
+    
+    # Update timing configuration
+    update_interval: 30min              # Auto-refresh every 30 minutes
+                                        # Balances freshness with e-ink wear
+                                        # E-ink has limited refresh cycles (~millions)
+    # update_interval: 30s              # Fast update for testing (commented out)
+                                        # Use 30s during development/debugging
+    
+    reset_duration: 200ms               # How long to hold reset pin LOW
+                                        # 200ms is standard for most e-ink displays
+                                        # Too short = unreliable initialization
+                                        # Too long = unnecessary delay
+    
+    full_update_every: 1                # How often to do full refresh vs partial
+                                        # 1 = every update is a full refresh (cleanest)
+                                        # Higher numbers = partial updates (faster but ghosting)
+                                        # Full refresh = complete black/white/black cycle
+                                        # Partial = only update changed pixels (not supported on all models)
+    
+    rotation: 0                         # Display rotation (0, 90, 180, 270 degrees)
+                                        # 0 = no rotation (landscape orientation)
+                                        # Adjust based on physical mounting
+    
+    # ==========================================================================
+    # DISPLAY RENDERING LAMBDA
+    # ==========================================================================
+    # C++ code that draws content on the e-ink display
+    # Runs whenever component.update is called
+    # "it" object provides drawing functions (printf, line, etc.)
+    # ==========================================================================
+    lambda: |-
+      // Log that display is updating (visible in ESPHome logs)
+      ESP_LOGI("display", "Updating...");
+      
+      // ======================================================================
+      // HEADER SECTION
+      // ======================================================================
+      // Title and separator lines at top of display
+      // ======================================================================
+      
+      // Display title
+      /* it.printf(5, 15, id(font_medium_65), TextAlign::BASELINE_LEFT, "DESIGN LANE"); */
+      // Original title commented out, replaced with TINY-STATUS below
+      
+      it.printf(1, 15, id(font_medium_65), TextAlign::BASELINE_LEFT, "   TINY-STATUS   ");
+      // Parameters breakdown:
+      // x=1, y=15              Position (pixels from top-left)
+      // id(font_medium_65)     Font to use (defined above)
+      // TextAlign::BASELINE_LEFT   Align left from baseline
+      // "   TINY-STATUS   "    Text to display (centered with spaces)
+      
+      // Underline for title (thin line)
+      it.line(3, 16, 125, 16);
+      // Parameters: x1, y1, x2, y2 (start point to end point)
+      // Horizontal line from x=3 to x=125 at y=16
+      
+      // Thicker separator line below title
+      it.line(1, 30, 128, 30);
+      // Full width line (128 = display width in pixels)
+      // Separates header from content below
+      
+      // ======================================================================
+      // DATE/TIME SECTION
+      // ======================================================================
+      // Shows current day, date, and time from Home Assistant
+      // ======================================================================
+      
+      // Day of week (e.g., "Monday")
+      it.strftime(7, 55, id(font_medium_65), TextAlign::BASELINE_LEFT, "%A", id(homeassistant_time).now());
+      // strftime = format time/date using standard C format codes
+      // %A = full weekday name
+      // id(homeassistant_time).now() = current time from Home Assistant
+      
+      // Date (e.g., "25 Apr. 24")
+      it.strftime(7, 72, id(font_medium_65), TextAlign::BASELINE_LEFT, "%d %b. %y", id(homeassistant_time).now());
+      // %d = day of month (01-31)
+      // %b = abbreviated month name (Jan, Feb, etc.)
+      // %y = 2-digit year (24 for 2024)
+      
+      // Time (e.g., "14:30")
+      it.strftime(7, 89, id(font_medium_65), TextAlign::BASELINE_LEFT, "%H:%M", id(homeassistant_time).now());
+      // %H = hour in 24-hour format (00-23)
+      // %M = minute (00-59)
+      // No seconds to reduce display updates
+      
+      // Separator line after time
+      it.line(5, 110, 128, 110);
+      
+      // ======================================================================
+      // SOLAR YIELD SECTION (Energy Harvested Today)
+      // ======================================================================
+      // Shows kWh (kilowatt-hours) produced from solar panels
+      // ======================================================================
+      
+      // Total yield from all solar arrays
+      it.printf(7, 140, id(font_medium_65), TextAlign::BASELINE_LEFT , "Total:  %skWh", id(total_yield_today).state.c_str());
+      // %s = string substitution (sensor value)
+      // .state.c_str() = convert sensor state to C string
+      // "Total:  " has extra space for alignment
+      
+      // Upper solar array yield (MPPT 150/60)
+      it.printf(7, 160, id(font_medium_65), TextAlign::BASELINE_LEFT , "Upper: %3skWh", id(yield_today_150_60).state.c_str());
+      // %3s = minimum 3 characters wide (right-aligned if shorter)
+      // Helps align decimal points vertically
+      
+      // Lower solar array yield (MPPT 150/35)
+      it.printf(7, 180, id(font_medium_65), TextAlign::BASELINE_LEFT , "Lower: %skWh", id(yield_today_150_35).state.c_str());
+      
+      // ======================================================================
+      // SOLAR POWER SECTION (Peak Power Today)
+      // ======================================================================
+      // Shows maximum watts (W) achieved from solar panels today
+      // ======================================================================
+      
+      // Total peak power from all arrays
+      it.printf(7, 200, id(font_medium_65), TextAlign::BASELINE_LEFT , "Total:  %sW", id(eink_total_maxpower_today).state.c_str());
+      // Similar formatting to yield section for visual consistency
+      
+      // Upper array peak power
+      it.printf(7, 220, id(font_medium_65), TextAlign::BASELINE_LEFT , "Upper: %sW", id(eink_maxpower_today_150_60).state.c_str());
+      
+      // Lower array peak power
+      it.printf(7, 240, id(font_medium_65), TextAlign::BASELINE_LEFT , "Lower: %sW", id(eink_maxpower_today_150_35).state.c_str());
+      
+      // ======================================================================
+      // FOOTER SEPARATOR
+      // ======================================================================
+      it.line(1, 260, 128, 260);
+      // Final separator line at bottom
+      // Display height is 296 pixels, so this leaves some margin at bottom
+
+# ==============================================================================
+# ADDITIONAL NOTES
+# ==============================================================================
+#
+# E-INK DISPLAY CHARACTERISTICS:
+# - Resolution: 296x128 pixels (2.9" diagonal)
+# - Colors: Black & White only (1-bit)
+# - Refresh time: ~2-15 seconds (varies by temperature)
+# - Viewing angle: ~170° (excellent, like paper)
+# - Power: ~0.4W during refresh, ~0mW when idle
+# - Lifespan: ~1 million refresh cycles (years of daily use)
+#
+# TROUBLESHOOTING:
+# - Blank display: Check SPI wiring, verify model number
+# - Ghosting/artifacts: Increase full_update_every or use full refresh only
+# - Slow updates: Normal for e-ink, check busy_pin is connected
+# - Wrong data: Check Home Assistant entity_id names match exactly
+# - Display won't update: Check data_updated flag in logs
+# - Boot loops: Check API connection, verify WiFi credentials
+#
+# OPTIMIZATION TIPS:
+# - Reduce update_interval to save e-ink refresh cycles
+# - Use data_updated flag to skip unnecessary refreshes
+# - Partial updates faster but cause ghosting (not supported on all models)
+# - Increase reboot_timeout if Home Assistant is slow to start
+# - Monitor logs for sensor update timing
+#
+# SENSOR VALUE FORMAT:
+# - All sensors are text_sensor (string values from Home Assistant)
+# - Formatting (units, decimals) handled in Home Assistant
+# - Display shows values as-is with added labels
+# - No math or conversions done in ESPHome
+#
+# POWER CONSUMPTION:
+# - Idle: ~50-100mA (WiFi connected, no display update)
+# - Update: ~150-250mA (during e-ink refresh)
+# - Deep sleep: Not configured (could add for battery operation)
+# - Annual cost: <$1 USD electricity (24/7 operation)
+#
+# FUTURE ENHANCEMENTS:
+# - Add battery icons based on SOC percentage
+# - Graph solar production over time
+# - Add weather forecast integration
+# - Implement deep sleep for battery operation
+# - Add touch button for manual refresh
+# - Display battery charge/discharge arrows
+# - Show network status (WiFi strength, IP address)
+#
+# ==============================================================================
