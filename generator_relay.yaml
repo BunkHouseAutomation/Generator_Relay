@@ -102,7 +102,7 @@ ota:
 wifi:
   # Static IP configuration (recommended for automation hardware)
   manual_ip:
-    static_ip: 10.10.30.13               # Fixed IP address for this relay controller
+    static_ip: 10.10.30.15               # Fixed IP address for this relay controller
                                          # Easier to find device on network
                                          # Faster boot (no DHCP negotiation)
                                          # Must be outside DHCP range to avoid conflicts
@@ -117,10 +117,10 @@ wifi:
   
   # WiFi credentials stored in secrets.yaml file
   # This keeps sensitive information separate from main config
-  ssid: !secret wifi_ssid_design         # WiFi network name (SSID)
+  ssid: !secret wifi_ssid_tiny         # WiFi network name (SSID)
                                          # !secret pulls value from secrets.yaml
                                          # Keeps WiFi credentials out of version control
-  password: !secret wifi_password_design # WiFi password
+  password: !secret wifi_password_tiny # WiFi password
                                          # Also stored in secrets.yaml
 
   # Fallback Access Point (AP mode if WiFi connection fails)
